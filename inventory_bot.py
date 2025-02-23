@@ -12,27 +12,29 @@ def process_inventory(on_hand_path, transaction_path):
     three_years_ago = pd.Timestamp.today() - pd.DateOffset(years=3)
     filtered_transactions = transaction_df[transaction_df["Physical date"] >= three_years_ago]
     
-    # Aggregate monthly usage per item
+    # Aggregate total usage per item over 3 years
     usage_per_item = (
         filtered_transactions.groupby("Item number")["Quantity"]
         .sum()
         .abs()
-        .div(36)  # Convert to average monthly usage over 3 years
     )
     
     # Merge with on-hand data
     order_suggestions = on_hand_df[["Item number", "Product name", "Available physical"]].merge(
-        usage_per_item.rename("Avg Monthly Usage"), on="Item number", how="left"
+        usage_per_item.rename("Total 3-Year Usage"), on="Item number", how="left"
     )
     
-    # Fill NaN values for Avg Monthly Usage with 0 before calculations
-    order_suggestions["Avg Monthly Usage"] = order_suggestions["Avg Monthly Usage"].fillna(0)
+    # Fill NaN values for Total Usage with 0 before calculations
+    order_suggestions["Total 3-Year Usage"] = order_suggestions["Total 3-Year Usage"].fillna(0)
+    
+    # Calculate average monthly usage
+    order_suggestions["Avg Monthly Usage"] = order_suggestions["Total 3-Year Usage"] / 36
     
     # Identify most used items
     most_used_items = order_suggestions.sort_values(by="Avg Monthly Usage", ascending=False).head(10)
     
-    # Calculate safety stock (e.g., 3 months of average usage)
-    order_suggestions["Safety Stock"] = order_suggestions["Avg Monthly Usage"] * 3
+    # Calculate safety stock based on 3 years of average usage (e.g., 6 months of usage)
+    order_suggestions["Safety Stock"] = order_suggestions["Avg Monthly Usage"] * 6
     
     # Calculate suggested order quantity
     order_suggestions["Suggested Order Qty"] = (
