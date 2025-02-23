@@ -42,6 +42,9 @@ def process_inventory(on_hand_path, transaction_path):
     # Keep only items that need ordering
     final_order_list = order_suggestions[order_suggestions["Suggested Order Qty"] > 0]
     
+    # Remove duplicates based on Item number
+    final_order_list = final_order_list.drop_duplicates(subset=["Item number"], keep="first")
+    
     return final_order_list
 
 st.title("Inventory Order Suggestion Bot")
