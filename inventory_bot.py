@@ -38,7 +38,7 @@ def process_inventory(on_hand_path, transaction_path):
     # Calculate order level, safety stock, EOQ, and final order quantity
     order_suggestions["Order Level"] = order_suggestions["Annual Max Consumption"] / 12
     order_suggestions["Safety Stock"] = (order_suggestions["Order Level"] * 3)
-    order_suggestions["EOQ"] = order_suggestions["Safety Stock"] - order_suggestions["Available physical"] - order_suggestions["On order quantity"]
+    order_suggestions["EOQ"] = order_suggestions["Safety Stock"] - order_suggestions["Available physical"] - order_suggestions["Ordered in total"]
     order_suggestions["EOQ"] = order_suggestions["EOQ"].apply(lambda x: max(0, round(x)))
     order_suggestions["Final Order Qty"] = order_suggestions["EOQ"].apply(lambda x: max(5, x) if x > 0 else 0)
     
