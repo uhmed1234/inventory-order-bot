@@ -7,46 +7,63 @@ def process_inventory(on_hand_path, transaction_path):
     on_hand_df = pd.read_excel(on_hand_path)
     transaction_df = pd.read_excel(transaction_path)
     
-    # Convert Physical date to datetime and filter last 3 years
+    # Convert Physical date to datetime and filter last 5 years
     transaction_df["Physical date"] = pd.to_datetime(transaction_df["Physical date"], errors="coerce")
-    three_years_ago = pd.Timestamp.today() - pd.DateOffset(years=3)
-    filtered_transactions = transaction_df[transaction_df["Physical date"] >= three_years_ago]
+    five_years_ago = pd.Timestamp.today() - pd.DateOffset(years=5)
+    filtered_transactions = transaction_df[transaction_df["Physical date"] >= five_years_ago]
     
-    # Aggregate issued quantity per item
-    issued_per_item = (
-        filtered_transactions.groupby("Item number")["Quantity"]
-        .sum()
-        .abs()
-        .div(36)  # Convert to average monthly issued quantity over 3 years
-    )
+    # Aggregate yearly purchase and consumption per item
+    filtered_transactions["Year"] = filtered_transactions["Physical date"].dt.year
+    purchase_per_year = filtered_transactions[filtered_transactions["Quantity"] > 0].groupby(["Item number", "Year"])["Quantity"].sum().unstack().fillna(0)
+    consumption_per_year = filtered_transactions[filtered_transactions["Quantity"] < 0].groupby(["Item number", "Year"])["Quantity"].sum().abs().unstack().fillna(0)
     
     # Merge with on-hand data
-    order_suggestions = on_hand_df[["Item number", "Product name", "Available physical"]].merge(
-        issued_per_item.rename("Avg Monthly Issued"), on="Item number", how="left"
-    )
+    order_suggestions = on_hand_df[["Item number", "Product name", "Available physical", "On order quantity"]].merge(
+        purchase_per_year, on="Item number", how="left"
+    ).merge(
+        consumption_per_year, on="Item number", how="left", suffixes=("_Purchase", "_Consumption")
+    ).fillna(0)
     
-    # Fill NaN values for Avg Monthly Issued with 0 before calculations
-    order_suggestions["Avg Monthly Issued"] = order_suggestions["Avg Monthly Issued"].fillna(0)
+    # Calculate annual averages
+    order_suggestions["Annual Avg Purchase"] = purchase_per_year.mean(axis=1)
+    order_suggestions["Annual Avg Consumption"] = consumption_per_year.mean(axis=1)
     
-    # Calculate safety stock (3 months of average issued quantity)
-    order_suggestions["Safety Stock"] = order_suggestions["Avg Monthly Issued"] * 3
+    # Calculate Annual Maximum Consumption
+    order_suggestions["Annual Max Consumption"] = consumption_per_year.max(axis=1)
     
-    # Calculate suggested order quantity only if on-hand is below safety stock
-    order_suggestions["Suggested Order Qty"] = (
-        order_suggestions["Safety Stock"] - order_suggestions["Available physical"]
-    ).apply(lambda x: max(0, round(x)))
+    # Set Order Delivery Period (Months) and Order Interval per Year (assumed to be 12 months / period)
+    order_suggestions["Order Delivery Period (Months)"] = 3  # Assuming a default value of 3 months
+    order_suggestions["Order Interval per Year"] = 12 / order_suggestions["Order Delivery Period (Months)"]
     
-    # Apply minimum order quantity (at least 5 units if needed)
-    order_suggestions["Suggested Order Qty"] = order_suggestions["Suggested Order Qty"].apply(lambda x: max(5, x) if x > 0 else 0)
+    # Calculate Order Level
+    order_suggestions["Order Level"] = order_suggestions["Annual Max Consumption"] / order_suggestions["Order Interval per Year"]
     
-    # Flag items with zero usage for manual review
-    order_suggestions["Flag for Review"] = order_suggestions["Avg Monthly Issued"] == 0
+    # Calculate Safety Stock
+    order_suggestions["Safety Stock"] = (order_suggestions["Annual Max Consumption"] / 12) * order_suggestions["Order Delivery Period (Months)"]
+    
+    # Calculate Maximum Order
+    order_suggestions["Maximum Order"] = order_suggestions["Annual Max Consumption"] * 1.5  # Assuming a factor
+    
+    # Calculate EOQ
+    order_suggestions["EOQ"] = (order_suggestions["Maximum Order"] + order_suggestions["Safety Stock"] - order_suggestions["Available physical"] - order_suggestions["On order quantity"]).apply(lambda x: max(0, x))
+    
+    # Apply Adjustments (New Forecasts, set to 0 for now)
+    order_suggestions["Adjustments (New Forecasts)"] = 0
+    
+    # Calculate Optimum Order
+    order_suggestions["Optimum Order"] = order_suggestions[["EOQ", "Adjustments (New Forecasts)"]].sum(axis=1)
+    
+    # Set Minimum Order (Supplier Requirement)
+    order_suggestions["Minimum Order"] = 5  # Default minimum order quantity
+    
+    # Calculate Final Order Qty
+    order_suggestions["Final Order Qty"] = order_suggestions[["Optimum Order", "Minimum Order"]].max(axis=1)
+    
+    # Round Up Final Order Qty
+    order_suggestions["Final Order Qty (Rounded)"] = order_suggestions["Final Order Qty"].apply(lambda x: max(5, round(x)))
     
     # Keep only items that need ordering
-    final_order_list = order_suggestions[order_suggestions["Suggested Order Qty"] > 0]
-    
-    # Remove duplicates based on Item number
-    final_order_list = final_order_list.drop_duplicates(subset=["Item number"], keep="first")
+    final_order_list = order_suggestions[order_suggestions["Final Order Qty (Rounded)"] > 0]
     
     return final_order_list
 
@@ -69,3 +86,4 @@ if on_hand_file and transaction_file:
         output_file = "Order_Suggestions.xlsx"
         df_result.to_excel(output_file, index=False)
         st.download_button(label="Download Order Suggestions", data=open(output_file, "rb"), file_name=output_file, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
