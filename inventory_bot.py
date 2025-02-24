@@ -28,7 +28,7 @@ def process_inventory(on_hand_path, transaction_path):
     yearly_summary["Annual Max Consumption"] = yearly_summary[yearly_summary.columns[-6:-1]].max(axis=1)
     
     # Merge with on-hand data
-    order_suggestions = on_hand_df[["Item number", "Product name", "Available physical", "On order quantity"]].merge(
+    order_suggestions = on_hand_df[["Item number", "Product name", "Available physical", "Ordered in total"]].merge(
         yearly_summary, on="Item number", how="left"
     )
     
