@@ -7,48 +7,43 @@ def process_inventory(on_hand_path, transaction_path):
     on_hand_df = pd.read_excel(on_hand_path)
     transaction_df = pd.read_excel(transaction_path)
     
-    # Aggregate duplicate items in on-hand list by summing "Available physical"
-    on_hand_df = on_hand_df.groupby("Item number", as_index=False).agg({
-        "Product name": "first",
-        "Available physical": "sum"
-    })
+    # Sum "Available physical" for duplicate items in on-hand list
+    on_hand_df = on_hand_df.groupby(["Item number", "Product name"], as_index=False).agg({"Available physical": "sum"})
     
     # Convert Physical date to datetime and filter last 5 years
     transaction_df["Physical date"] = pd.to_datetime(transaction_df["Physical date"], errors="coerce")
     five_years_ago = pd.Timestamp.today() - pd.DateOffset(years=5)
     filtered_transactions = transaction_df[transaction_df["Physical date"] >= five_years_ago]
     
-    # Aggregate annual purchase and consumption per item
-    annual_data = filtered_transactions.groupby(["Item number", filtered_transactions["Physical date"].dt.year])
-    annual_purchase = annual_data["Purchase Quantity"].sum().unstack(fill_value=0)
-    annual_consumption = annual_data["Issued Quantity"].sum().unstack(fill_value=0)
+    # Extract annual purchase and consumption data
+    filtered_transactions["Year"] = filtered_transactions["Physical date"].dt.year
+    annual_data = filtered_transactions.groupby(["Item number", "Year"]).agg({
+        "Quantity": "sum"
+    }).reset_index()
     
-    # Calculate averages
-    avg_purchase = annual_purchase.mean(axis=1)
-    avg_consumption = annual_consumption.mean(axis=1)
+    # Pivot data to get last 5 years' purchase and consumption
+    annual_pivot = annual_data.pivot(index="Item number", columns="Year", values="Quantity").fillna(0)
     
-    # Merge data
-    order_suggestions = on_hand_df.merge(avg_purchase.rename("Annual Avg Purchase"), on="Item number", how="left")
-    order_suggestions = order_suggestions.merge(avg_consumption.rename("Annual Avg Consumption"), on="Item number", how="left")
+    # Calculate annual averages
+    annual_pivot["Annual Avg Purchase"] = annual_pivot.mean(axis=1)
+    annual_pivot["Annual Avg Consumption"] = annual_pivot.mean(axis=1)
+    
+    # Merge with on-hand data
+    order_suggestions = on_hand_df.merge(
+        annual_pivot, on="Item number", how="left"
+    )
     
     # Fill NaN values with 0
     order_suggestions.fillna(0, inplace=True)
     
     # Calculate safety stock (6 months of average consumption)
-    order_suggestions["Safety Stock"] = order_suggestions["Annual Avg Consumption"] / 2
+    order_suggestions["Safety Stock"] = order_suggestions["Annual Avg Consumption"] * 6 / 12
     
-    # Calculate suggested order quantity
-    order_suggestions["Final Order Qty"] = (
-        order_suggestions["Safety Stock"] - order_suggestions["Available physical"]
-    ).apply(lambda x: max(0, round(x)))
+    # Calculate EOQ and final order quantity
+    order_suggestions["EOQ"] = order_suggestions["Safety Stock"] - order_suggestions["Available physical"]
+    order_suggestions["Final Order Qty"] = order_suggestions["EOQ"].apply(lambda x: max(0, round(x)))
     
-    # Apply minimum order quantity (at least 5 units if needed)
-    order_suggestions["Final Order Qty"] = order_suggestions["Final Order Qty"].apply(lambda x: max(5, x) if x > 0 else 0)
-    
-    # Identify most used items
-    most_used_items = order_suggestions.sort_values(by="Annual Avg Consumption", ascending=False).head(10)
-    
-    return order_suggestions, most_used_items
+    return order_suggestions
 
 st.title("Inventory Order Suggestion Bot")
 
@@ -60,20 +55,12 @@ if on_hand_file and transaction_file:
         on_hand_temp.write(on_hand_file.read())
         transaction_temp.write(transaction_file.read())
         
-        df_result, df_most_used = process_inventory(on_hand_temp.name, transaction_temp.name)
+        df_result = process_inventory(on_hand_temp.name, transaction_temp.name)
         
         st.write("### Order Suggestions")
         st.dataframe(df_result)
-        
-        st.write("### Most Used Items")
-        st.dataframe(df_most_used)
         
         # Provide download option for order suggestions
         output_file = "Order_Suggestions.xlsx"
         df_result.to_excel(output_file, index=False)
         st.download_button(label="Download Order Suggestions", data=open(output_file, "rb"), file_name=output_file, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        
-        # Provide download option for most used items
-        output_most_used_file = "Most_Used_Items.xlsx"
-        df_most_used.to_excel(output_most_used_file, index=False)
-        st.download_button(label="Download Most Used Items", data=open(output_most_used_file, "rb"), file_name=output_most_used_file, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
