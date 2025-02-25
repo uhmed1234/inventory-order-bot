@@ -7,7 +7,11 @@ def process_inventory(on_hand_path, transaction_path):
     on_hand_df = pd.read_excel(on_hand_path)
     transaction_df = pd.read_excel(transaction_path)
     
-    # Handle duplicate items by summing 'Available physical'
+    # Standardize column names
+    on_hand_df.columns = on_hand_df.columns.str.strip()
+    transaction_df.columns = transaction_df.columns.str.strip()
+    
+    # Aggregate duplicate items in on-hand file by summing "Available physical"
     on_hand_df = on_hand_df.groupby(["Item number", "Product name"], as_index=False).agg({"Available physical": "sum"})
     
     # Convert Physical date to datetime and filter last 5 years
@@ -15,38 +19,32 @@ def process_inventory(on_hand_path, transaction_path):
     five_years_ago = pd.Timestamp.today() - pd.DateOffset(years=5)
     filtered_transactions = transaction_df[transaction_df["Physical date"] >= five_years_ago]
     
-    # Aggregate annual purchase and consumption per item
-    purchase_per_year = filtered_transactions.groupby([filtered_transactions["Physical date"].dt.year, "Item number"])['Quantity'].sum().unstack(fill_value=0)
-    annual_avg_purchase = purchase_per_year.mean(axis=1)
-    annual_avg_consumption = purchase_per_year.abs().mean(axis=1)
+    # Calculate annual consumption and purchases per item
+    annual_usage = filtered_transactions.groupby(["Item number", transaction_df["Physical date"].dt.year])["Quantity"].sum().unstack().fillna(0)
+    annual_usage = annual_usage.abs()  # Ensure all values are positive
+    
+    # Calculate averages
+    annual_usage["Annual Avg Consumption"] = annual_usage.mean(axis=1)
+    annual_usage["Annual Avg Purchase"] = annual_usage.mean(axis=1)
     
     # Merge with on-hand data
-    order_suggestions = on_hand_df.merge(
-        annual_avg_purchase.rename("Annual Avg Purchase"), on="Item number", how="left"
-    ).merge(
-        annual_avg_consumption.rename("Annual Avg Consumption"), on="Item number", how="left"
-    )
+    order_suggestions = on_hand_df.merge(annual_usage[["Annual Avg Consumption", "Annual Avg Purchase"]], on="Item number", how="left")
     
-    # Fill NaN values
-    order_suggestions["Annual Avg Purchase"] = order_suggestions["Annual Avg Purchase"].fillna(0)
-    order_suggestions["Annual Avg Consumption"] = order_suggestions["Annual Avg Consumption"].fillna(0)
-    
-    # Identify most used items
-    most_used_items = order_suggestions.sort_values(by="Annual Avg Consumption", ascending=False).head(10)
+    # Fill NaN values for averages
+    order_suggestions[["Annual Avg Consumption", "Annual Avg Purchase"]] = order_suggestions[["Annual Avg Consumption", "Annual Avg Purchase"]].fillna(0)
     
     # Calculate safety stock (6 months of average consumption)
-    order_suggestions["Safety Stock"] = order_suggestions["Annual Avg Consumption"] / 2
+    order_suggestions["Safety Stock"] = order_suggestions["Annual Avg Consumption"] / 2  # 6 months = half year
     
-    # Calculate suggested order quantity
-    order_suggestions["Suggested Order Qty"] = (
-        order_suggestions["Safety Stock"] - order_suggestions["Available physical"]
-    ).apply(lambda x: max(0, round(x)))
+    # Calculate EOQ (Economic Order Quantity)
+    order_suggestions["EOQ"] = (order_suggestions["Safety Stock"] - order_suggestions["Available physical"]).apply(lambda x: max(0, round(x)))
     
     # Apply minimum order quantity (at least 5 units if needed)
-    order_suggestions["Suggested Order Qty"] = order_suggestions["Suggested Order Qty"].apply(lambda x: max(5, x) if x > 0 else 0)
+    order_suggestions["EOQ"] = order_suggestions["EOQ"].apply(lambda x: max(5, x) if x > 0 else 0)
     
-    # Keep items that need ordering and frequently used items
-    final_order_list = order_suggestions[(order_suggestions["Suggested Order Qty"] > 0) | (order_suggestions["Annual Avg Consumption"] > 0)]
+    # Keep items that need ordering and most used items
+    final_order_list = order_suggestions[order_suggestions["EOQ"] > 0]
+    most_used_items = order_suggestions.sort_values(by="Annual Avg Consumption", ascending=False).head(10)
     
     return final_order_list, most_used_items
 
@@ -77,4 +75,3 @@ if on_hand_file and transaction_file:
         output_most_used_file = "Most_Used_Items.xlsx"
         df_most_used.to_excel(output_most_used_file, index=False)
         st.download_button(label="Download Most Used Items", data=open(output_most_used_file, "rb"), file_name=output_most_used_file, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
