@@ -7,43 +7,43 @@ def process_inventory(on_hand_path, transaction_path):
     on_hand_df = pd.read_excel(on_hand_path)
     transaction_df = pd.read_excel(transaction_path)
     
+    # Remove "Annual Max Consumption" column if it exists
+    if "Annual Max Consumption" in on_hand_df.columns:
+        on_hand_df = on_hand_df.drop(columns=["Annual Max Consumption"])
+    
+    # Handle duplicate items by summing "Available physical"
+    on_hand_df = on_hand_df.groupby(["Item number", "Product name"], as_index=False).agg({"Available physical": "sum", "Ordered in total": "sum"})
+    
     # Convert Physical date to datetime and filter last 5 years
     transaction_df["Physical date"] = pd.to_datetime(transaction_df["Physical date"], errors="coerce")
     five_years_ago = pd.Timestamp.today() - pd.DateOffset(years=5)
-    recent_transactions = transaction_df[transaction_df["Physical date"] >= five_years_ago]
+    filtered_transactions = transaction_df[transaction_df["Physical date"] >= five_years_ago]
     
-    # Aggregate purchase and consumption data per year
-    transaction_df["Year"] = transaction_df["Physical date"].dt.year
-    yearly_summary = transaction_df.groupby(["Item number", "Year"])["Quantity"].sum().unstack(fill_value=0)
-    
-    # Ensure we have 5 years of data
-    latest_year = pd.Timestamp.today().year
-    for year in range(latest_year - 4, latest_year + 1):
-        if year not in yearly_summary.columns:
-            yearly_summary[year] = 0
+    # Aggregate yearly purchase and consumption per item
+    purchase_per_year = filtered_transactions[filtered_transactions["Quantity"] > 0].groupby(["Item number", filtered_transactions["Physical date"].dt.year])["Quantity"].sum().unstack(fill_value=0)
+    consumption_per_year = filtered_transactions[filtered_transactions["Quantity"] < 0].groupby(["Item number", filtered_transactions["Physical date"].dt.year])["Quantity"].sum().abs().unstack(fill_value=0)
     
     # Calculate annual averages
-    yearly_summary["Annual Avg Purchase"] = yearly_summary.mean(axis=1)
-    yearly_summary["Annual Avg Consumption"] = yearly_summary[yearly_summary.columns[-6:-1]].mean(axis=1)
-    yearly_summary["Annual Max Consumption"] = yearly_summary[yearly_summary.columns[-6:-1]].max(axis=1)
+    purchase_per_year["Annual Avg Purchase"] = purchase_per_year.mean(axis=1)
+    consumption_per_year["Annual Avg Consumption"] = consumption_per_year.mean(axis=1)
     
     # Merge with on-hand data
-    order_suggestions = on_hand_df[["Item number", "Product name", "Available physical", "Ordered in total"]].merge(
-        yearly_summary, on="Item number", how="left"
-    )
+    order_suggestions = on_hand_df.merge(purchase_per_year, on="Item number", how="left").merge(consumption_per_year, on="Item number", how="left")
     
-    # Fill NaN values with 0
+    # Fill NaN values for missing data
     order_suggestions.fillna(0, inplace=True)
     
-    # Calculate order level, safety stock, EOQ, and final order quantity
-    order_suggestions["Order Level"] = order_suggestions["Annual Max Consumption"] / 12
-    order_suggestions["Safety Stock"] = (order_suggestions["Order Level"] * 3)
-    order_suggestions["EOQ"] = order_suggestions["Safety Stock"] - order_suggestions["Available physical"] - order_suggestions["Ordered in total"]
-    order_suggestions["EOQ"] = order_suggestions["EOQ"].apply(lambda x: max(0, round(x)))
-    order_suggestions["Final Order Qty"] = order_suggestions["EOQ"].apply(lambda x: max(5, x) if x > 0 else 0)
+    # Calculate safety stock (3 months of annual average consumption)
+    order_suggestions["Safety Stock"] = order_suggestions["Annual Avg Consumption"] / 4
     
-    # Remove duplicates based on Item number
-    final_order_list = order_suggestions.drop_duplicates(subset=["Item number"], keep="first")
+    # Calculate final order quantity (ensuring at least 3 months of safety stock)
+    order_suggestions["Final Order Qty"] = (order_suggestions["Safety Stock"] - order_suggestions["Available physical"]).apply(lambda x: max(0, round(x)))
+    
+    # Apply minimum order quantity (at least 5 units if needed)
+    order_suggestions["Final Order Qty"] = order_suggestions["Final Order Qty"].apply(lambda x: max(5, x) if x > 0 else 0)
+    
+    # Keep only items that need ordering
+    final_order_list = order_suggestions[order_suggestions["Final Order Qty"] > 0]
     
     return final_order_list
 
