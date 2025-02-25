@@ -7,46 +7,51 @@ def process_inventory(on_hand_path, transaction_path):
     on_hand_df = pd.read_excel(on_hand_path)
     transaction_df = pd.read_excel(transaction_path)
     
-    # Standardize column names
-    on_hand_df.columns = on_hand_df.columns.str.strip()
-    transaction_df.columns = transaction_df.columns.str.strip()
+    # Standardize column names to avoid merge issues
+    on_hand_df.rename(columns=lambda x: x.strip(), inplace=True)
+    transaction_df.rename(columns=lambda x: x.strip(), inplace=True)
     
-    # Aggregate duplicate items in on-hand file by summing "Available physical"
-    on_hand_df = on_hand_df.groupby(["Item number", "Product name"], as_index=False).agg({"Available physical": "sum"})
+    # Ensure "Item number" is string type for accurate merging
+    on_hand_df["Item number"] = on_hand_df["Item number"].astype(str)
+    transaction_df["Item number"] = transaction_df["Item number"].astype(str)
+    
+    # Aggregate duplicate items by summing "Available physical"
+    on_hand_df = on_hand_df.groupby("Item number", as_index=False).agg(
+        {"Product name": "first", "Available physical": "sum"}
+    )
     
     # Convert Physical date to datetime and filter last 5 years
     transaction_df["Physical date"] = pd.to_datetime(transaction_df["Physical date"], errors="coerce")
     five_years_ago = pd.Timestamp.today() - pd.DateOffset(years=5)
     filtered_transactions = transaction_df[transaction_df["Physical date"] >= five_years_ago]
     
-    # Calculate annual consumption and purchases per item
-    annual_usage = filtered_transactions.groupby(["Item number", transaction_df["Physical date"].dt.year])["Quantity"].sum().unstack().fillna(0)
-    annual_usage = annual_usage.abs()  # Ensure all values are positive
+    # Calculate annual purchases and consumption
+    transaction_summary = filtered_transactions.groupby(["Item number", "Physical date"])["Quantity"].sum().unstack(fill_value=0)
+    annual_purchases = transaction_summary.where(transaction_summary > 0, 0).sum(axis=1) / 5  # Last 5 years avg
+    annual_consumption = transaction_summary.where(transaction_summary < 0, 0).abs().sum(axis=1) / 5
     
-    # Calculate averages
-    annual_usage["Annual Avg Consumption"] = annual_usage.mean(axis=1)
-    annual_usage["Annual Avg Purchase"] = annual_usage.mean(axis=1)
+    # Merge all calculations into order suggestions
+    order_suggestions = on_hand_df.merge(annual_purchases.rename("Annual Avg Purchase"), on="Item number", how="left")
+    order_suggestions = order_suggestions.merge(annual_consumption.rename("Annual Avg Consumption"), on="Item number", how="left")
     
-    # Merge with on-hand data
-    order_suggestions = on_hand_df.merge(annual_usage[["Annual Avg Consumption", "Annual Avg Purchase"]], on="Item number", how="left")
+    # Fill NaN values
+    order_suggestions.fillna({"Annual Avg Purchase": 0, "Annual Avg Consumption": 0, "Available physical": 0}, inplace=True)
     
-    # Fill NaN values for averages
-    order_suggestions[["Annual Avg Consumption", "Annual Avg Purchase"]] = order_suggestions[["Annual Avg Consumption", "Annual Avg Purchase"]].fillna(0)
+    # Calculate safety stock (6 months of avg consumption)
+    order_suggestions["Safety Stock"] = order_suggestions["Annual Avg Consumption"] / 2
     
-    # Calculate safety stock (6 months of average consumption)
-    order_suggestions["Safety Stock"] = order_suggestions["Annual Avg Consumption"] / 2  # 6 months = half year
-    
-    # Calculate EOQ (Economic Order Quantity)
-    order_suggestions["EOQ"] = (order_suggestions["Safety Stock"] - order_suggestions["Available physical"]).apply(lambda x: max(0, round(x)))
+    # Calculate final order quantity
+    order_suggestions["Final Order Qty"] = (
+        order_suggestions["Safety Stock"] - order_suggestions["Available physical"]
+    ).apply(lambda x: max(0, round(x)))
     
     # Apply minimum order quantity (at least 5 units if needed)
-    order_suggestions["EOQ"] = order_suggestions["EOQ"].apply(lambda x: max(5, x) if x > 0 else 0)
+    order_suggestions["Final Order Qty"] = order_suggestions["Final Order Qty"].apply(lambda x: max(5, x) if x > 0 else 0)
     
-    # Keep items that need ordering and most used items
-    final_order_list = order_suggestions[order_suggestions["EOQ"] > 0]
+    # Identify most used items (top 10 by consumption)
     most_used_items = order_suggestions.sort_values(by="Annual Avg Consumption", ascending=False).head(10)
     
-    return final_order_list, most_used_items
+    return order_suggestions, most_used_items
 
 st.title("Inventory Order Suggestion Bot")
 
