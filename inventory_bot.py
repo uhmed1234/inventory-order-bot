@@ -8,42 +8,46 @@ def process_inventory(on_hand_path, transaction_path):
     transaction_df = pd.read_excel(transaction_path)
     
     # Sum "Available physical" for duplicate items in on-hand list
-    on_hand_df = on_hand_df.groupby(["Item number", "Product name"], as_index=False).agg({"Available physical": "sum"})
+    on_hand_df = on_hand_df.groupby(["Item number", "Product name", "Unit"], as_index=False).agg({
+        "Available physical": "sum",
+        "On ordered Qty": "sum"
+    }).rename(columns={"Available physical": "On Hand Qty"})
     
     # Convert Physical date to datetime and filter last 5 years
     transaction_df["Physical date"] = pd.to_datetime(transaction_df["Physical date"], errors="coerce")
-    five_years_ago = pd.Timestamp.today() - pd.DateOffset(years=5)
-    filtered_transactions = transaction_df[transaction_df["Physical date"] >= five_years_ago]
+    five_years_ago = pd.Timestamp.today().year - 5
+    transaction_df = transaction_df[transaction_df["Physical date"].dt.year >= five_years_ago]
     
-    # Extract annual purchase and consumption data
-    filtered_transactions["Year"] = filtered_transactions["Physical date"].dt.year
-    annual_data = filtered_transactions.groupby(["Item number", "Year"]).agg({
-        "Quantity": "sum"
-    }).reset_index()
+    # Extract purchase and consumption data by year
+    transaction_df["Year"] = transaction_df["Physical date"].dt.year
+    annual_data = transaction_df.groupby(["Item number", "Year", "Transaction Type"]).agg({"Quantity": "sum"}).reset_index()
     
-    # Pivot data to get last 5 years' purchase and consumption
-    annual_pivot = annual_data.pivot(index="Item number", columns="Year", values="Quantity").fillna(0)
+    # Pivot to get purchase and consumption data separately
+    purchase_pivot = annual_data[annual_data["Transaction Type"] == "Purchase"].pivot(index="Item number", columns="Year", values="Quantity").fillna(0)
+    consumption_pivot = annual_data[annual_data["Transaction Type"] == "Consumption"].pivot(index="Item number", columns="Year", values="Quantity").fillna(0)
     
-    # Calculate annual averages
-    annual_pivot["Annual Avg Purchase"] = annual_pivot.mean(axis=1)
-    annual_pivot["Annual Avg Consumption"] = annual_pivot.mean(axis=1)
+    # Calculate annual averages and max consumption
+    purchase_pivot["Annual Average Purchase"] = purchase_pivot.mean(axis=1)
+    consumption_pivot["Annual Average Consumption"] = consumption_pivot.mean(axis=1)
+    consumption_pivot["Annual Maximum Consumption"] = consumption_pivot.max(axis=1)
     
     # Merge with on-hand data
-    order_suggestions = on_hand_df.merge(
-        annual_pivot, on="Item number", how="left"
-    )
+    result_df = on_hand_df.merge(purchase_pivot, on="Item number", how="left")
+    result_df = result_df.merge(consumption_pivot, on="Item number", how="left")
     
     # Fill NaN values with 0
-    order_suggestions.fillna(0, inplace=True)
+    result_df.fillna(0, inplace=True)
     
-    # Calculate safety stock (6 months of average consumption)
-    order_suggestions["Safety Stock"] = order_suggestions["Annual Avg Consumption"] * 6 / 12
+    # Order calculations
+    result_df["Order Delivery Period (Months)"] = 2  # Example fixed period
+    result_df["Order Interval per year"] = 12 / result_df["Order Delivery Period (Months)"]
+    result_df["Order Level"] = result_df["Annual Average Consumption"] * (result_df["Order Delivery Period (Months)"] / 12)
+    result_df["Safety Stock"] = result_df["Annual Maximum Consumption"] * 0.5  # Example safety stock formula
+    result_df["Maximum Order"] = result_df["Safety Stock"] + result_df["Order Level"]
+    result_df["EOQ"] = result_df["Maximum Order"] - result_df["On Hand Qty"]
+    result_df["Final Order Qty"] = result_df["EOQ"].apply(lambda x: max(0, round(x)))
     
-    # Calculate EOQ and final order quantity
-    order_suggestions["EOQ"] = order_suggestions["Safety Stock"] - order_suggestions["Available physical"]
-    order_suggestions["Final Order Qty"] = order_suggestions["EOQ"].apply(lambda x: max(0, round(x)))
-    
-    return order_suggestions
+    return result_df
 
 st.title("Inventory Order Suggestion Bot")
 
